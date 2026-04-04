@@ -1,15 +1,28 @@
 from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-def load_pdf():
+def main():
+    # Load PDF
     loader = PyPDFLoader("notes.pdf")
     documents = loader.load()
 
-    print(f"\nTotal pages loaded: {len(documents)}\n")
+    print(f"\nTotal pages: {len(documents)}")
 
-    for i, doc in enumerate(documents):
-        print(f"--- Page {i+1} ---")
-        print(doc.page_content[:300])
-        print("\n" + "-"*50 + "\n")
+    # Chunking
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=500,
+        chunk_overlap=50
+    )
+
+    chunks = splitter.split_documents(documents)
+
+    print(f"\nTotal chunks created: {len(chunks)}\n")
+
+    # Show sample chunks
+    for i, chunk in enumerate(chunks[:3]):
+        print(f"--- Chunk {i+1} ---")
+        print(chunk.page_content)
+        print("\n" + "="*50 + "\n")
 
 if __name__ == "__main__":
-    load_pdf()
+    main()
