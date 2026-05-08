@@ -1,96 +1,57 @@
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
-
-from transformers import pipeline
-
-
-def load_and_prepare_data():
-    # Load PDF
-    loader = PyPDFLoader("notes.pdf")
-    documents = loader.load()
-
-    print(f"\nTotal pages loaded: {len(documents)}")
-
-    # Split into chunks
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=50
-    )
-    chunks = splitter.split_documents(documents)
-
-    print(f"Total chunks created: {len(chunks)}")
-
-    return chunks
-
-
-def create_vector_store(chunks):
-    # Embedding model
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2"
-    )
-
-    # Create FAISS DB
-    vector_db = FAISS.from_documents(chunks, embeddings)
-
-    return vector_db
-
-
-def load_llm():
-    # Local LLM (free)
-    generator = pipeline(
-        "text-generation",
-        model="distilgpt2"
-    )
-    return generator
-
-
-def ask_questions(vector_db, generator):
-    while True:
-        query = input("\nAsk something (or type 'exit'): ")
-
-        if query.lower() == "exit":
-            print("Exiting...")
-            break
-
-        # Retrieve relevant chunks
-        results = vector_db.similarity_search(query, k=3)
-
-        context = "\n".join([doc.page_content for doc in results])
-
-        # Prompt
-        prompt = f"""
-You are an AI assistant. Answer the question using ONLY the context below.
-
-Context:
-{context}
-
-Question: {query}
-
-Answer:
+"""
+DocMind CLI — Terminal-based Document QA.
+Usage: python app.py notes.pdf
 """
 
-        # Generate response
-        response = generator(
-            prompt,
-            max_new_tokens=200,
-            do_sample=True,
-            temperature=0.7
-        )
-
-        print("\nAI Answer:\n")
-        print(response[0]['generated_text'])
+import sys
+import os
+from pathlib import Path
+from utils.document_processor import load_document, chunk_documents
+from utils.vector_store import build_vector_store, similarity_search, format_context
+from utils.llm_handler import generate_answer
 
 
 def main():
-    print("🚀 Starting Document QA System...")
+    filepath = sys.argv[1] if len(sys.argv) > 1 else "notes.pdf"
 
-    chunks = load_and_prepare_data()
-    vector_db = create_vector_store(chunks)
-    generator = load_llm()
+    if not Path(filepath).exists():
+        print(f"❌ File not found: {filepath}")
+        sys.exit(1)
 
-    ask_questions(vector_db, generator)
+    print(f"🧠 DocMind CLI — {filepath}")
+    print("Loading and indexing document...")
+
+    docs = load_document(filepath)
+    chunks = chunk_documents(docs)
+
+    print(f"✅ {len(docs)} pages → {len(chunks)} chunks indexed")
+    print("Type 'exit' to quit.\n")
+
+    vector_db = build_vector_store(chunks)
+    history = []
+
+    while True:
+        try:
+            query = input("Ask: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nBye!")
+            break
+
+        if not query or query.lower() in ("exit", "quit"):
+            print("Bye!")
+            break
+
+        results = similarity_search(vector_db, query, k=4)
+        context, citations = format_context(results)
+        answer = generate_answer(query, context, chat_history=history)
+
+        history.append({"role": "user", "content": query})
+        history.append({"role": "assistant", "content": answer})
+
+        print(f"\n{'─'*60}")
+        print(answer)
+        print(f"\nSources: {', '.join(c['label'] for c in citations)}")
+        print(f"{'─'*60}\n")
 
 
 if __name__ == "__main__":
