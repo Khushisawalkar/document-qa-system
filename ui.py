@@ -537,9 +537,31 @@ with st.sidebar:
             unsafe_allow_html=True,
         )
 
-    # Clear
+    # Actions
     if st.session_state.documents_meta:
-        if st.button("🗑️ Clear All", use_container_width=True):
+        st.markdown("---")
+        st.markdown("**🛠️ Actions**")
+        
+        if st.session_state.chat_history:
+            chat_md = "# DocMind Chat History\n\n"
+            for turn in st.session_state.chat_history:
+                role = "User" if turn["role"] == "user" else "DocMind"
+                chat_md += f"### {role}\n{turn['content']}\n\n"
+                if turn.get("citations"):
+                    chat_md += "**Sources:**\n"
+                    for c in turn["citations"]:
+                        chat_md += f"- {c['label']}\n"
+                    chat_md += "\n"
+            
+            st.download_button(
+                "💾 Export Chat History",
+                data=chat_md,
+                file_name="docmind_chat_history.md",
+                mime="text/markdown",
+                use_container_width=True
+            )
+
+        if st.button("🗑️ Clear All Data", use_container_width=True):
             for k in ["vector_db", "chat_history", "documents_meta", "total_chunks"]:
                 st.session_state[k] = None if k == "vector_db" else ([] if k != "total_chunks" else 0)
             st.rerun()
@@ -591,10 +613,24 @@ else:
                     unsafe_allow_html=True,
                 )
 
+        # Audio input for voice questions
+        audio_val = st.audio_input("🎤 Voice Question")
+        if audio_val and audio_val.getvalue() != st.session_state.get("_last_audio"):
+            from utils.llm_handler import transcribe_audio
+            with st.spinner("Transcribing voice input..."):
+                transcribed = transcribe_audio(audio_val.getvalue())
+                if not transcribed.startswith("⚠️"):
+                    st.session_state._pending_query = transcribed
+                    st.session_state._last_audio = audio_val.getvalue()
+                    st.rerun()
+                else:
+                    st.error(transcribed)
+                    st.session_state._last_audio = audio_val.getvalue()
+
         # Chat input
         query = st.chat_input("Ask anything about your documents...")
 
-        # Handle suggested question click
+        # Handle suggested question click or voice question
         if hasattr(st.session_state, "_pending_query") and st.session_state._pending_query:
             query = st.session_state._pending_query
             st.session_state._pending_query = None
@@ -649,6 +685,20 @@ else:
         if not any(m.get("summary") for m in st.session_state.documents_meta):
             st.info("Summaries are generated during document processing.")
         else:
+            # Export Summaries Button
+            summaries_md = "# DocMind Summaries\n\n"
+            for m in st.session_state.documents_meta:
+                if m.get("summary"):
+                    summaries_md += f"## {m['filename']}\n{m['summary']}\n\n"
+            
+            st.download_button(
+                "💾 Export Summaries",
+                data=summaries_md,
+                file_name="docmind_summaries.md",
+                mime="text/markdown"
+            )
+            st.markdown("---")
+
             for m in st.session_state.documents_meta:
                 ft = m["file_type"]
                 icon = {"PDF": "📕", "DOCX": "📘", "TXT": "📄"}.get(ft, "📄")

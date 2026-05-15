@@ -218,3 +218,29 @@ Text:
     except Exception:
 
         return []
+
+
+# ─────────────────────────────────────────────────────────────
+# Transcribe Audio
+# ─────────────────────────────────────────────────────────────
+def transcribe_audio(
+    audio_bytes: bytes,
+) -> str:
+    """
+    Transcribe audio bytes to text using Gemini.
+    """
+    prompt = "Transcribe the following audio accurately. Return ONLY the transcribed text without any formatting, quotes, or markdown."
+    
+    try:
+        response = model.generate_content([
+            {"mime_type": "audio/wav", "data": audio_bytes},
+            prompt
+        ])
+        
+        if hasattr(response, "text"):
+            return response.text.strip()
+            
+        return "⚠️ Could not transcribe audio."
+        
+    except Exception as e:
+        return f"⚠️ Audio Transcription Error: {str(e)}"
