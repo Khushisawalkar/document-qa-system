@@ -95,6 +95,31 @@ def similarity_search(
     return filtered if filtered else results[:3]
 
 
+def multi_query_search(
+    vector_db: FAISS,
+    queries: List[str],
+    k: int = 5,
+    score_threshold: float = 0.3,
+) -> List[Tuple[Document, float]]:
+    """
+    Perform semantic search for multiple queries and deduplicate results.
+    """
+    all_results = []
+    seen_content = set()
+    
+    for q in queries:
+        results = similarity_search(vector_db, q, k=k, score_threshold=score_threshold)
+        for doc, score in results:
+            if doc.page_content not in seen_content:
+                seen_content.add(doc.page_content)
+                all_results.append((doc, score))
+                
+    # Sort by score descending (higher is usually better or worse depending on FAISS metric? FAISS default is L2, lower is better. 
+    # But `similarity_search_with_relevance_scores` returns higher for better match).
+    all_results.sort(key=lambda x: x[1], reverse=True)
+    return all_results[:k * 2]
+
+
 def format_context(
     results: List[Tuple[Document, float]]
 ) -> Tuple[str, List[Dict]]:

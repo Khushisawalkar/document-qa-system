@@ -131,6 +131,42 @@ Answer:
 
 
 # ─────────────────────────────────────────────────────────────
+# Decompose Query
+# ─────────────────────────────────────────────────────────────
+def decompose_query(query: str) -> List[str]:
+    """
+    Decompose a vague user query into multiple specific search queries
+    to improve retrieval accuracy.
+    """
+    prompt = f"""
+You are an expert AI search assistant.
+Your task is to decompose the following user query into 3 distinct, highly specific search queries.
+These queries will be used to retrieve relevant documents from a vector database.
+
+Return ONLY the 3 queries, separated by newlines, with no bullet points or extra text.
+
+User Query:
+{query}
+"""
+    try:
+        response = model.generate_content(prompt)
+        if not hasattr(response, "text"):
+            return [query]
+        
+        raw_queries = [q.strip("- *1234567890. \t") for q in response.text.strip().split("\n") if q.strip()]
+        if not raw_queries:
+            return [query]
+        
+        # Ensure the original query is also included
+        if query not in raw_queries:
+            raw_queries.insert(0, query)
+            
+        return raw_queries[:4]
+    except Exception:
+        return [query]
+
+
+# ─────────────────────────────────────────────────────────────
 # Generate Summary
 # ─────────────────────────────────────────────────────────────
 def generate_summary(

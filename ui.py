@@ -340,8 +340,14 @@ hr { border-color: #1e2030 !important; }
 """, unsafe_allow_html=True)
 
 # ─── Init Session State ────────────────────────────────────────────────────────
+import uuid
+import requests
+
+import os
+API_URL = os.getenv("API_URL", "http://127.0.0.1:8000/api")
+
 defaults = {
-    "vector_db": None,
+    "session_id": str(uuid.uuid4()),
     "chat_history": [],
     "documents_meta": [],   # [{filename, pages, chunks, file_type, keywords, summary}]
     "total_chunks": 0,
@@ -351,12 +357,6 @@ defaults = {
 for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
-
-# ─── Lazy Imports (avoid blocking) ────────────────────────────────────────────
-@st.cache_resource(show_spinner=False)
-def _get_embeddings():
-    from utils.vector_store import get_embeddings
-    return get_embeddings()
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -422,81 +422,38 @@ with st.sidebar:
 
     if uploaded_files:
         if st.button("⚡ Process Documents", use_container_width=True):
-            from utils.document_processor import load_document, chunk_documents
-            from utils.vector_store import build_vector_store, merge_vector_stores
-            from utils.llm_handler import generate_summary, extract_keywords
-
-            progress = st.progress(0, text="Loading embeddings...")
-            _get_embeddings()  # Warm up
-
-            new_metas = []
-            all_new_chunks = []
-
-            for idx, uf in enumerate(uploaded_files):
-                progress.progress((idx / len(uploaded_files)) * 0.6, text=f"Processing {uf.name}...")
-
+            progress = st.progress(0, text="Uploading documents...")
+            
+            files_to_upload = []
+            for uf in uploaded_files:
                 # Already processed?
                 already = any(m["filename"] == uf.name for m in st.session_state.documents_meta)
                 if already:
                     continue
+                files_to_upload.append(("files", (uf.name, uf.getvalue(), uf.type)))
 
-                suffix = Path(uf.name).suffix
-                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                    tmp.write(uf.read())
-                    tmp_path = tmp.name
-
+            if files_to_upload:
                 try:
-                    docs = load_document(tmp_path)
-                    chunks = chunk_documents(docs)
-
-                    # Tag filename properly
-                    for c in chunks:
-                        c.metadata["filename"] = uf.name
-
-                    all_new_chunks.extend(chunks)
-
-                    # Summary + keywords from first chunks
-                    sample_text = " ".join([c.page_content for c in chunks[:8]])
-
-                    new_metas.append({
-                        "filename": uf.name,
-                        "file_type": suffix.lstrip(".").upper(),
-                        "pages": max((c.metadata.get("page", 1) for c in docs), default=1),
-                        "chunks": len(chunks),
-                        "summary": None,
-                        "keywords": [],
-                        "sample_text": sample_text,
-                    })
-
+                    res = requests.post(
+                        f"{API_URL}/upload",
+                        data={"session_id": st.session_state.session_id},
+                        files=files_to_upload
+                    )
+                    if res.status_code == 200:
+                        data = res.json()
+                        for meta in data["metadata"]:
+                            st.session_state.documents_meta.append(meta)
+                            st.session_state.total_chunks += meta["chunks"]
+                        st.success(f"✅ {data['indexed_documents']} document(s) indexed")
+                    else:
+                        st.error(f"❌ Upload failed: {res.text}")
                 except Exception as e:
-                    st.error(f"❌ {uf.name}: {e}")
-                finally:
-                    os.unlink(tmp_path)
-
-            if all_new_chunks:
-                progress.progress(0.7, text="Building vector index...")
-                new_store = build_vector_store(all_new_chunks)
-                st.session_state.vector_db = merge_vector_stores(
-                    st.session_state.vector_db, new_store
-                )
-                st.session_state.total_chunks += len(all_new_chunks)
-
-                # Generate summaries + keywords
-                for i, meta in enumerate(new_metas):
-                    progress.progress(0.75 + i * 0.05, text=f"Summarizing {meta['filename']}...")
-                    try:
-                        meta["summary"] = generate_summary(meta["sample_text"], meta["filename"])
-                        meta["keywords"] = extract_keywords(meta["sample_text"])
-                    except Exception:
-                        meta["summary"] = "Summary unavailable."
-                        meta["keywords"] = []
-                    del meta["sample_text"]
-                    st.session_state.documents_meta.append(meta)
-
-                progress.progress(1.0, text="Done!")
-                time.sleep(0.5)
-                progress.empty()
-                st.success(f"✅ {len(new_metas)} document(s) indexed")
+                    st.error(f"❌ API Error: {str(e)}")
+            
+            progress.progress(1.0, text="Done!")
+            import time
+            time.sleep(0.5)
+            progress.empty()
 
     # Document list
     if st.session_state.documents_meta:
@@ -562,8 +519,13 @@ with st.sidebar:
             )
 
         if st.button("🗑️ Clear All Data", use_container_width=True):
-            for k in ["vector_db", "chat_history", "documents_meta", "total_chunks"]:
-                st.session_state[k] = None if k == "vector_db" else ([] if k != "total_chunks" else 0)
+            try:
+                requests.delete(f"{API_URL}/session/{st.session_state.session_id}")
+            except:
+                pass
+            for k in ["chat_history", "documents_meta", "total_chunks"]:
+                st.session_state[k] = [] if k != "total_chunks" else 0
+            st.session_state.session_id = str(uuid.uuid4())
             st.rerun()
 
 # ─── Main Area ─────────────────────────────────────────────────────────────────
@@ -635,30 +597,33 @@ else:
             query = st.session_state._pending_query
             st.session_state._pending_query = None
 
-        if query and st.session_state.vector_db:
-            from utils.vector_store import similarity_search, format_context
-            from utils.llm_handler import generate_answer
-
+        if query and st.session_state.documents_meta:
             # Show user msg
             st.markdown(f'<div class="msg-user">{query}</div>', unsafe_allow_html=True)
             st.session_state.chat_history.append({"role": "user", "content": query})
 
             # Retrieve
-            with st.spinner("Searching documents..."):
-                results = similarity_search(st.session_state.vector_db, query, k=5)
-                context, citations = format_context(results)
-
-            # Stream answer
             placeholder = st.empty()
-            with st.spinner("Generating answer..."):
+            with st.spinner("Searching and generating answer..."):
                 try:
-                    answer = generate_answer(
-                        query, context,
-                        chat_history=st.session_state.chat_history,
-                        language=st.session_state.language,
+                    res = requests.post(
+                        f"{API_URL}/query",
+                        json={
+                            "session_id": st.session_state.session_id,
+                            "query": query,
+                            "language": st.session_state.language
+                        }
                     )
+                    if res.status_code == 200:
+                        data = res.json()
+                        answer = data["answer"]
+                        citations = data["citations"]
+                        sub_queries = data.get("sub_queries", [])
+                    else:
+                        answer = f"⚠️ Error: {res.text}"
+                        citations = []
                 except Exception as e:
-                    answer = f"⚠️ Error: {e}"
+                    answer = f"⚠️ API Error: {str(e)}"
                     citations = []
 
             stream_text(placeholder, answer)
@@ -677,7 +642,7 @@ else:
                 "citations": citations,
             })
 
-        elif query and not st.session_state.vector_db:
+        elif query and not st.session_state.documents_meta:
             st.warning("Please process documents first.")
 
     # ── Summaries Tab ──
