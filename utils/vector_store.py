@@ -1,168 +1,86 @@
-"""
-Embedding generation and FAISS vector store management.
-"""
-
-from typing import List, Dict, Optional, Tuple
-
-from langchain_core.documents import Document
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
-
-
-# Embedding model
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-
-# Singleton embeddings instance
-_embeddings_instance = None
-
-
-def get_embeddings() -> HuggingFaceEmbeddings:
+class DocumentVectorStore:
     """
-    Load embeddings model once and reuse it.
+    A simplified Document Store that replaces the FAISS vector database.
+    This class manages text chunks and retrieves the most similar ones
+    using a simple keyword matching algorithm, removing the need for heavy
+    machine learning dependencies.
     """
+    def __init__(self):
+        # Store metadata and original text for each chunk
+        self.chunks = []
 
-    global _embeddings_instance
+    def add_chunks(self, chunks: list):
+        """
+        Add chunks to the store.
+        """
+        if not chunks:
+            return
+        
+        self.chunks.extend(chunks)
 
-    if _embeddings_instance is None:
+    def similarity_search(self, query: str, k: int = 4) -> list:
+        """
+        Find the most relevant document chunks for a given user question 
+        using a simple keyword overlap scoring mechanism.
+        """
+        if not self.chunks:
+            return []
+            
+        # Convert query to a set of lowercase words for matching
+        # In a real app we might remove stop words, but this is a simple implementation
+        query_words = set("".join(c for c in query.lower() if c.isalnum() or c.isspace()).split())
+        
+        results = []
+        for i, chunk in enumerate(self.chunks):
+            text = chunk["page_content"].lower()
+            text_words = set("".join(c for c in text if c.isalnum() or c.isspace()).split())
+            
+            # Simple score: how many query words are in the chunk text?
+            overlap = len(query_words.intersection(text_words))
+            
+            # We also add a tiny tie-breaker based on index so order is consistent
+            tie_breaker = 1.0 / (1.0 + i)
+            
+            score = float(overlap) + (tie_breaker * 0.01)
+            results.append((chunk, score))
+            
+        # Sort by score descending
+        results.sort(key=lambda x: x[1], reverse=True)
+        
+        # Normalize scores to max 1.0 (or just return as is if max is 0)
+        max_score = results[0][1] if results else 0
+        if max_score > 0:
+            normalized_results = [(chunk, score / max_score) for chunk, score in results[:k]]
+        else:
+            normalized_results = [(chunk, 0.1) for chunk, score in results[:k]]
+            
+        return normalized_results
 
-        _embeddings_instance = HuggingFaceEmbeddings(
-            model_name=EMBEDDING_MODEL,
-            model_kwargs={
-                "device": "cpu"
-            },
-            encode_kwargs={
-                "normalize_embeddings": True
-            },
-        )
-
-    return _embeddings_instance
-
-
-def build_vector_store(chunks: List[Document]) -> FAISS:
+def format_context(results: list) -> tuple:
     """
-    Create FAISS vector database from document chunks.
+    Format the search results into a readable string for the AI 
+    and extract citation information for the UI.
     """
-
-    embeddings = get_embeddings()
-
-    vector_db = FAISS.from_documents(
-        chunks,
-        embeddings,
-    )
-
-    return vector_db
-
-
-def merge_vector_stores(
-    existing: Optional[FAISS],
-    new_store: FAISS,
-) -> FAISS:
-    """
-    Merge multiple uploaded document indexes.
-    """
-
-    if existing is None:
-        return new_store
-
-    existing.merge_from(new_store)
-
-    return existing
-
-
-def similarity_search(
-    vector_db: FAISS,
-    query: str,
-    k: int = 5,
-    score_threshold: float = 0.3,
-) -> List[Tuple[Document, float]]:
-    """
-    Perform semantic similarity search.
-    """
-
-    results = vector_db.similarity_search_with_relevance_scores(
-        query,
-        k=k,
-    )
-
-    # Filter low relevance
-    filtered = [
-        (doc, score)
-        for doc, score in results
-        if score >= score_threshold
-    ]
-
-    # Fallback if nothing passes threshold
-    return filtered if filtered else results[:3]
-
-
-def multi_query_search(
-    vector_db: FAISS,
-    queries: List[str],
-    k: int = 5,
-    score_threshold: float = 0.3,
-) -> List[Tuple[Document, float]]:
-    """
-    Perform semantic search for multiple queries and deduplicate results.
-    """
-    all_results = []
-    seen_content = set()
-    
-    for q in queries:
-        results = similarity_search(vector_db, q, k=k, score_threshold=score_threshold)
-        for doc, score in results:
-            if doc.page_content not in seen_content:
-                seen_content.add(doc.page_content)
-                all_results.append((doc, score))
-                
-    # Sort by score descending (higher is usually better or worse depending on FAISS metric? FAISS default is L2, lower is better. 
-    # But `similarity_search_with_relevance_scores` returns higher for better match).
-    all_results.sort(key=lambda x: x[1], reverse=True)
-    return all_results[:k * 2]
-
-
-def format_context(
-    results: List[Tuple[Document, float]]
-) -> Tuple[str, List[Dict]]:
-    """
-    Build LLM context string and citation metadata.
-    """
-
     context_parts = []
-
     citations = []
-
-    for i, (doc, score) in enumerate(results):
-
-        meta = doc.metadata
-
+    
+    for i, (chunk, score) in enumerate(results):
+        meta = chunk["metadata"]
         filename = meta.get("filename", "Unknown")
-
         page = meta.get("page", "?")
-
-        file_type = meta.get("file_type", "").upper()
-
-        source_label = f"[{i+1}] {filename} • Page {page}"
-
-        # Context for LLM
-        context_parts.append(
-            f"""
---- Source {i+1}: {filename} (Page {page}) ---
-
-{doc.page_content}
-"""
-        )
-
-        # Citation info for UI
+        
+        # 1. Text format for the AI to read
+        context_parts.append(f"--- Source {i+1}: {filename} (Page {page}) ---\n{chunk['page_content']}")
+        
+        # 2. Structured data for the UI to display citations
         citations.append({
             "index": i + 1,
             "filename": filename,
             "page": page,
-            "file_type": file_type,
             "score": round(score, 3),
-            "snippet": doc.page_content[:200].strip() + "...",
-            "label": source_label,
+            "snippet": chunk["page_content"][:200].strip() + "...",
+            "label": f"[{i+1}] {filename} • Page {page}"
         })
-
+        
     context = "\n\n".join(context_parts)
-
     return context, citations

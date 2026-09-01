@@ -1,282 +1,112 @@
-"""
-LLM handler using Google Gemini API for intelligent QA.
-"""
-
 import os
-from typing import List, Dict, Optional
-
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 
-
-# ─────────────────────────────────────────────────────────────
-# Load environment variables
-# ─────────────────────────────────────────────────────────────
+# Load API key from .env file
 load_dotenv()
-
-
-# ─────────────────────────────────────────────────────────────
-# Configure Gemini
-# ─────────────────────────────────────────────────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-if not GEMINI_API_KEY:
-    raise ValueError(
-        "❌ GEMINI_API_KEY not found in .env file"
-    )
+client = None
+if GEMINI_API_KEY:
+    client = genai.Client(api_key=GEMINI_API_KEY)
+MODEL_ID = "gemini-2.5-flash"
 
-genai.configure(api_key=GEMINI_API_KEY)
-
-
-# ─────────────────────────────────────────────────────────────
-# Gemini Model
-# ─────────────────────────────────────────────────────────────
-model = genai.GenerativeModel(
-    "models/gemini-2.5-flash"
-)
-# ─────────────────────────────────────────────────────────────
-# System Prompt
-# ─────────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """
-You are DocMind, an advanced AI-powered document analyst
-and research assistant.
-
-Your job is to answer questions ONLY using the provided
-document context.
-
-Rules:
-- Never fabricate information
-- If answer is unavailable, say:
-  "I couldn't find this in the uploaded documents."
-- Use concise professional language
-- Use markdown formatting
-- Use bullet points when useful
-- Mention source/page references naturally
-- Focus on factual accuracy
-"""
-
-
-# ─────────────────────────────────────────────────────────────
-# Generate Answer
-# ─────────────────────────────────────────────────────────────
-def generate_answer(
-    query: str,
-    context: str,
-    chat_history: Optional[List[Dict]] = None,
-    language: str = "English",
-) -> str:
+def generate_answer(query: str, context: str, chat_history: list = None, language: str = "English") -> str:
     """
-    Generate contextual answer using Gemini.
+    Generate an answer using Gemini based ONLY on the provided document context.
     """
-
-    # Handle empty retrieval
+    if not client:
+        return "⚠️ Gemini API key is missing. Please add it to your .env file."
+        
     if not context.strip():
         return "I couldn't find relevant information in the uploaded documents."
 
-    # Build conversation history
+    # Format previous conversation history (last 4 turns)
     history_text = ""
-
     if chat_history:
-
         for turn in chat_history[-4:]:
+            role = "User" if turn["role"] == "user" else "Assistant"
+            history_text += f"{role}: {turn['content']}\n"
 
-            role = turn.get("role", "")
-
-            content = turn.get("content", "")
-
-            history_text += f"{role}: {content}\n"
-
-    # Final prompt
+    # Simple, clear prompt
     prompt = f"""
-{SYSTEM_PROMPT}
+You are an AI research assistant. Answer the user's question ONLY using the provided Document Context. 
+If the answer is not in the context, say "I couldn't find this in the uploaded documents."
 
-Respond in: {language}
-
-Conversation History:
-{history_text}
+Language to respond in: {language}
 
 Document Context:
 {context}
 
-Question:
+Conversation History:
+{history_text}
+
+User Question:
 {query}
 
 Answer:
 """
-
     try:
-
-        response = model.generate_content(
-            prompt
-        )
-
-        # Handle empty response
-        if not response:
-            return "⚠️ No response generated."
-
-        # Handle blocked/empty text
-        if not hasattr(response, "text"):
-            return "⚠️ Response blocked or unavailable."
-
-        answer = response.text.strip()
-
-        if not answer:
-            return "⚠️ Empty response generated."
-
-        return answer
-
+        response = client.models.generate_content(model=MODEL_ID, contents=prompt)
+        return response.text.strip() if response.text else "No response generated."
     except Exception as e:
+        return f"Gemini API Error: {str(e)}"
 
-        return f"⚠️ Gemini Error: {str(e)}"
-
-
-# ─────────────────────────────────────────────────────────────
-# Decompose Query
-# ─────────────────────────────────────────────────────────────
-def decompose_query(query: str) -> List[str]:
+def generate_summary(documents_text: str, filename: str) -> str:
     """
-    Decompose a vague user query into multiple specific search queries
-    to improve retrieval accuracy.
+    Generate a short summary of the document.
     """
-    prompt = f"""
-You are an expert AI search assistant.
-Your task is to decompose the following user query into 3 distinct, highly specific search queries.
-These queries will be used to retrieve relevant documents from a vector database.
-
-Return ONLY the 3 queries, separated by newlines, with no bullet points or extra text.
-
-User Query:
-{query}
-"""
-    try:
-        response = model.generate_content(prompt)
-        if not hasattr(response, "text"):
-            return [query]
+    if not client:
+        return "⚠️ Gemini API key is missing."
         
-        raw_queries = [q.strip("- *1234567890. \t") for q in response.text.strip().split("\n") if q.strip()]
-        if not raw_queries:
-            return [query]
-        
-        # Ensure the original query is also included
-        if query not in raw_queries:
-            raw_queries.insert(0, query)
-            
-        return raw_queries[:4]
-    except Exception:
-        return [query]
-
-
-# ─────────────────────────────────────────────────────────────
-# Generate Summary
-# ─────────────────────────────────────────────────────────────
-def generate_summary(
-    documents_text: str,
-    filename: str,
-) -> str:
-    """
-    Generate concise AI summary for document.
-    """
-
     prompt = f"""
-Analyze and summarize this document.
+Summarize the following document in a few bullet points. Include the main topic and key points.
+Filename: {filename}
 
-Filename:
-{filename}
-
-Provide:
-1. Main topic
-2. Key points
-3. Important conclusions
-4. Suggested questions
-
-Document:
+Document Text:
 {documents_text[:4000]}
 """
-
     try:
-
-        response = model.generate_content(
-            prompt
-        )
-
-        if hasattr(response, "text"):
-            return response.text.strip()
-
+        response = client.models.generate_content(model=MODEL_ID, contents=prompt)
+        return response.text.strip() if response.text else "Summary unavailable."
+    except Exception:
         return "Summary unavailable."
 
-    except Exception:
-
-        return "Summary unavailable."
-
-
-# ─────────────────────────────────────────────────────────────
-# Extract Keywords
-# ─────────────────────────────────────────────────────────────
-def extract_keywords(
-    text: str
-) -> List[str]:
+def extract_keywords(text: str) -> list:
     """
-    Extract important keywords and phrases.
+    Extract up to 10 important keywords from the text.
     """
-
-    prompt = f"""
-Extract the 10 most important keywords
-and key phrases from this text.
-
-Return ONLY a comma-separated list.
-
-Text:
-{text[:2500]}
-"""
-
+    if not client:
+        return []
+        
+    prompt = f"Extract the 10 most important keywords from this text as a comma-separated list:\n\n{text[:2500]}"
     try:
-
-        response = model.generate_content(
-            prompt
-        )
-
-        if not hasattr(response, "text"):
-            return []
-
-        raw = response.text.strip()
-
-        keywords = [
-            k.strip()
-            for k in raw.split(",")
-            if k.strip()
-        ]
-
-        # Remove duplicates
-        keywords = list(dict.fromkeys(keywords))
-
-        return keywords[:10]
-
+        response = client.models.generate_content(model=MODEL_ID, contents=prompt)
+        if response.text:
+            # Split by comma and clean up whitespace
+            keywords = [k.strip() for k in response.text.split(",") if k.strip()]
+            return keywords[:10]
+        return []
     except Exception:
-
         return []
 
-
-# ─────────────────────────────────────────────────────────────
-# Transcribe Audio
-# ─────────────────────────────────────────────────────────────
-def transcribe_audio(
-    audio_bytes: bytes,
-) -> str:
+def transcribe_audio(audio_bytes: bytes) -> str:
     """
     Transcribe audio bytes to text using Gemini.
     """
-    prompt = "Transcribe the following audio accurately. Return ONLY the transcribed text without any formatting, quotes, or markdown."
-    
+    if not client:
+        return "⚠️ Gemini API key is missing."
+        
+    prompt = "Transcribe the following audio exactly as spoken."
     try:
-        response = model.generate_content([
-            {"mime_type": "audio/wav", "data": audio_bytes},
-            prompt
-        ])
-        
-        if hasattr(response, "text"):
-            return response.text.strip()
-            
-        return "⚠️ Could not transcribe audio."
-        
+        response = client.models.generate_content(
+            model=MODEL_ID,
+            contents=[
+                types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav"),
+                prompt
+            ]
+        )
+        return response.text.strip() if response.text else "Could not transcribe audio."
     except Exception as e:
-        return f"⚠️ Audio Transcription Error: {str(e)}"
+        return f"Audio Transcription Error: {str(e)}"
