@@ -5,10 +5,22 @@ Premium dark editorial UI with multi-doc support, citations, summaries.
 
 import os
 import time
-import tempfile
+import uuid
 from pathlib import Path
 from typing import Optional
 import streamlit as st
+
+# Import our local NLP logic
+from utils.document_processor import load_document, chunk_documents
+from utils.vector_store import DocumentVectorStore, format_context
+from utils.llm_handler import (
+    generate_answer, 
+    generate_answer_stream, 
+    generate_summary, 
+    extract_keywords, 
+    generate_summary_and_keywords,
+    transcribe_audio
+)
 
 # ─── Page Config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -89,6 +101,7 @@ section[data-testid="stSidebar"] * {
 .doc-pill.pdf .dot { background: #f55b5b; }
 .doc-pill.docx .dot { background: #5bf5a0; }
 .doc-pill.txt .dot { background: #f5d45b; }
+.doc-pill.md .dot { background: #f5d45b; }
 
 /* ── Chat Messages ── */
 [data-testid="stChatMessage"] {
@@ -108,6 +121,8 @@ section[data-testid="stSidebar"] * {
     font-size: 0.95rem;
     line-height: 1.6;
     animation: slideIn 0.2s ease;
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
 .msg-assistant {
@@ -121,6 +136,8 @@ section[data-testid="stSidebar"] * {
     font-size: 0.93rem;
     line-height: 1.7;
     animation: slideIn 0.2s ease;
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 .msg-assistant code {
     background: #1a1d2a;
@@ -172,7 +189,7 @@ section[data-testid="stSidebar"] * {
     font-weight: 500;
 }
 .citation-meta .snippet {
-    color: #3d4460;
+    color: #616b8a;
     font-size: 0.72rem;
     margin-top: 2px;
     font-style: italic;
@@ -183,7 +200,7 @@ section[data-testid="stSidebar"] * {
     border-radius: 4px;
     padding: 1px 6px;
     font-size: 0.68rem;
-    color: #3d4460;
+    color: #5b8af5;
     white-space: nowrap;
 }
 
@@ -198,6 +215,7 @@ section[data-testid="stSidebar"] * {
     font-size: 0.88rem;
     line-height: 1.7;
     color: #9aa3b8;
+    white-space: pre-wrap;
 }
 .summary-box strong { color: #c8cdd8; }
 
@@ -287,18 +305,18 @@ section[data-testid="stSidebar"] * {
     color: #3d4460;
     margin-bottom: 0.5rem;
 }
-.empty-state p { font-size: 0.85rem; color: #252840; }
+.empty-state p { font-size: 0.85rem; color: #4a5168; }
 
 /* ── Keyword Tags ── */
 .kw-tag {
     display: inline-block;
-    background: #0d0f16;
-    border: 1px solid #1e2030;
+    background: #141620;
+    border: 1px solid #252840;
     border-radius: 20px;
     padding: 3px 10px;
-    font-size: 0.72rem;
-    color: #4a5168;
-    margin: 2px;
+    font-size: 0.75rem;
+    color: #7b85a0;
+    margin: 3px;
 }
 
 /* ── Dividers ── */
@@ -340,13 +358,6 @@ hr { border-color: #1e2030 !important; }
 """, unsafe_allow_html=True)
 
 # ─── Init Session State ────────────────────────────────────────────────────────
-import uuid
-
-# Import our local NLP logic
-from utils.document_processor import load_document, chunk_documents
-from utils.vector_store import DocumentVectorStore, format_context
-from utils.llm_handler import generate_answer, generate_summary, extract_keywords
-
 defaults = {
     "session_id": str(uuid.uuid4()),
     "chat_history": [],
@@ -355,6 +366,9 @@ defaults = {
     "language": "English",
     "show_citations": True,
     "vector_store": None,
+    "gemini_api_key": os.getenv("GEMINI_API_KEY", ""),
+    "_pending_query": None,
+    "_last_audio": None,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -364,16 +378,16 @@ for k, v in defaults.items():
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 def get_doc_type_class(file_type: str) -> str:
     ft = file_type.lower().lstrip(".")
-    return ft if ft in ("pdf", "docx", "txt") else "txt"
+    return ft if ft in ("pdf", "docx", "txt", "md") else "txt"
 
 
 def render_doc_pill(filename: str, file_type: str):
     cls = get_doc_type_class(file_type)
-    icon = {"pdf": "📕", "docx": "📘", "txt": "📄"}.get(cls, "📄")
+    icon = {"pdf": "📕", "docx": "📘", "txt": "📄", "md": "📄"}.get(cls, "📄")
     return f'<span class="doc-pill {cls}"><span class="dot"></span>{icon} {filename}</span>'
 
 
-def stream_text(placeholder, text: str, delay: float = 0.006):
+def stream_text(placeholder, text: str, delay: float = 0.005):
     buf = ""
     for ch in text:
         buf += ch
@@ -413,77 +427,101 @@ st.markdown("""
 
 # ─── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
+    st.markdown("### 🔑 API Configuration")
+    env_key = os.getenv("GEMINI_API_KEY", "")
+    current_key = st.session_state.get("gemini_api_key") or env_key
+    api_key_input = st.text_input(
+        "Gemini API Key",
+        value=current_key,
+        type="password",
+        placeholder="Enter your Gemini API Key...",
+        help="Google Gemini API key. If set in .env, it is detected automatically.",
+    )
+    if api_key_input != st.session_state.get("gemini_api_key"):
+        st.session_state.gemini_api_key = api_key_input
+
+    active_key = (st.session_state.get("gemini_api_key") or env_key).strip()
+    if active_key:
+        st.markdown('<small style="color:#5bf5a0">● API Key active</small>', unsafe_allow_html=True)
+    else:
+        st.markdown('<small style="color:#f55b5b">○ No API Key set</small>', unsafe_allow_html=True)
+
+    st.markdown("---")
     st.markdown("### 📂 Documents")
 
     uploaded_files = st.file_uploader(
-        "Upload PDF, DOCX, or TXT",
-        type=["pdf", "docx", "doc", "txt", "md"],
+        "Upload PDF, DOCX, TXT, or MD",
+        type=["pdf", "docx", "txt", "md"],
         accept_multiple_files=True,
         label_visibility="collapsed",
     )
 
     if uploaded_files:
         if st.button("⚡ Process Documents", use_container_width=True):
-            progress = st.progress(0, text="Uploading documents...")
+            progress = st.progress(0, text="Preparing documents...")
             
             files_to_upload = []
             for uf in uploaded_files:
-                # Already processed?
                 already = any(m["filename"] == uf.name for m in st.session_state.documents_meta)
                 if already:
                     continue
-                files_to_upload.append(("files", (uf.name, uf.getvalue(), uf.type)))
+                files_to_upload.append((uf.name, uf.getvalue(), uf.type))
 
-            if files_to_upload:
+            if not files_to_upload:
+                progress.empty()
+                st.info("Selected document(s) have already been processed.")
+            else:
                 try:
                     # Initialize local vector store if not already done
                     if st.session_state.vector_store is None:
                         st.session_state.vector_store = DocumentVectorStore()
 
-                    for name, content, mime in files_to_upload:
-                        suffix = os.path.splitext(name)[1]
-                        # Write uploaded file to a temporary location for processing
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                            tmp.write(content)
-                            tmp_path = tmp.name
+                    total_files = len(files_to_upload)
+                    active_api_key = st.session_state.get("gemini_api_key") or os.getenv("GEMINI_API_KEY")
+
+                    for idx, (name, content, mime) in enumerate(files_to_upload):
+                        progress.progress(
+                            idx / total_files,
+                            text=f"Processing {name} ({idx + 1}/{total_files})..."
+                        )
+                        suffix = os.path.splitext(name)[1].lower()
                         
-                        try:
-                            # 1. Extract Text
-                            docs = load_document(tmp_path)
-                            # 2. Chunk Text
-                            chunks = chunk_documents(docs)
-                            # 3. Store Vectors
+                        # 1. Extract Text directly in-memory (zero disk I/O overhead)
+                        docs = load_document(content, filename=name, file_type=suffix)
+                        # 2. Chunk Text with boundary awareness
+                        chunks = chunk_documents(docs)
+                        # 3. Store in Vector Store (indexed via inverted index)
+                        if chunks:
                             st.session_state.vector_store.add_chunks(chunks)
 
-                            # Generate a summary and keywords based on the first few chunks
-                            sample_text = " ".join([c["page_content"] for c in chunks[:8]])
+                        # Generate summary and keywords in a single fast API roundtrip
+                        sample_text = " ".join([c["page_content"] for c in chunks[:8]]) if chunks else ""
+                        summary = "Summary unavailable."
+                        keywords = []
+                        if sample_text and active_api_key:
                             try:
-                                summary = generate_summary(sample_text, name)
-                                keywords = extract_keywords(sample_text)
+                                summary, keywords = generate_summary_and_keywords(
+                                    sample_text, name, api_key=active_api_key
+                                )
                             except Exception:
-                                summary = "Summary unavailable."
-                                keywords = []
-                                
-                            pages = max([c["metadata"].get("page", 1) for c in docs], default=1)
-                            st.session_state.documents_meta.append({
-                                "filename": name,
-                                "file_type": suffix.lstrip(".").upper(),
-                                "pages": pages,
-                                "chunks": len(chunks),
-                                "summary": summary,
-                                "keywords": keywords,
-                            })
-                            st.session_state.total_chunks += len(chunks)
-                        finally:
-                            if os.path.exists(tmp_path):
-                                os.unlink(tmp_path)
-                                
-                    st.success(f"✅ {len(files_to_upload)} document(s) indexed")
+                                pass
+
+                        pages = max([c["metadata"].get("page", 1) for c in docs], default=1)
+                        st.session_state.documents_meta.append({
+                            "filename": name,
+                            "file_type": suffix.lstrip(".").upper(),
+                            "pages": pages,
+                            "chunks": len(chunks),
+                            "summary": summary,
+                            "keywords": keywords,
+                        })
+                        st.session_state.total_chunks += len(chunks)
+
+                    progress.progress(1.0, text="Done!")
+                    st.success(f"✅ {total_files} document(s) indexed successfully")
                 except Exception as e:
                     st.error(f"❌ Processing Error: {str(e)}")
             
-            progress.progress(1.0, text="Done!")
-            import time
             time.sleep(0.5)
             progress.empty()
 
@@ -493,10 +531,10 @@ with st.sidebar:
         st.markdown("**Loaded Documents**")
         for m in st.session_state.documents_meta:
             cls = get_doc_type_class(m["file_type"])
-            icon = {"PDF": "📕", "DOCX": "📘", "DOC": "📘", "TXT": "📄", "MD": "📄"}.get(m["file_type"], "📄")
+            icon = {"PDF": "📕", "DOCX": "📘", "TXT": "📄", "MD": "📄"}.get(m["file_type"], "📄")
             st.markdown(
                 f'<div class="doc-pill {cls}"><span class="dot"></span>{icon} {m["filename"]}<br>'
-                f'<small style="color:#2a2f3a">{m["pages"]} pages · {m["chunks"]} chunks</small></div>',
+                f'<small style="color:#616b8a">{m["pages"]} pages · {m["chunks"]} chunks</small></div>',
                 unsafe_allow_html=True,
             )
 
@@ -552,8 +590,11 @@ with st.sidebar:
 
         if st.button("🗑️ Clear All Data", use_container_width=True):
             st.session_state.vector_store = None
-            for k in ["chat_history", "documents_meta", "total_chunks"]:
-                st.session_state[k] = [] if k != "total_chunks" else 0
+            st.session_state.chat_history = []
+            st.session_state.documents_meta = []
+            st.session_state.total_chunks = 0
+            st.session_state._pending_query = None
+            st.session_state._last_audio = None
             st.session_state.session_id = str(uuid.uuid4())
             st.rerun()
 
@@ -564,7 +605,7 @@ if not st.session_state.documents_meta:
     <div class="empty-state">
         <div class="icon">🧠</div>
         <div class="title">No documents loaded</div>
-        <p>Upload PDF, DOCX, or TXT files from the sidebar<br>to start asking questions about your content.</p>
+        <p>Upload PDF, DOCX, TXT, or MD files from the sidebar<br>to start asking questions about your content.</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -607,10 +648,14 @@ else:
         # Audio input for voice questions
         audio_val = st.audio_input("🎤 Voice Question")
         if audio_val and audio_val.getvalue() != st.session_state.get("_last_audio"):
-            from utils.llm_handler import transcribe_audio
             with st.spinner("Transcribing voice input..."):
-                transcribed = transcribe_audio(audio_val.getvalue())
-                if not transcribed.startswith("⚠️"):
+                active_api_key = st.session_state.get("gemini_api_key") or os.getenv("GEMINI_API_KEY")
+                transcribed = transcribe_audio(
+                    audio_val.getvalue(),
+                    mime_type=getattr(audio_val, "type", "audio/wav"),
+                    api_key=active_api_key
+                )
+                if not transcribed.startswith("⚠️") and not transcribed.startswith("Audio Transcription Error"):
                     st.session_state._pending_query = transcribed
                     st.session_state._last_audio = audio_val.getvalue()
                     st.rerun()
@@ -622,7 +667,7 @@ else:
         query = st.chat_input("Ask anything about your documents...")
 
         # Handle suggested question click or voice question
-        if hasattr(st.session_state, "_pending_query") and st.session_state._pending_query:
+        if st.session_state.get("_pending_query"):
             query = st.session_state._pending_query
             st.session_state._pending_query = None
 
@@ -631,34 +676,56 @@ else:
             st.markdown(f'<div class="msg-user">{query}</div>', unsafe_allow_html=True)
             st.session_state.chat_history.append({"role": "user", "content": query})
 
-            # Retrieve
+            # Retrieve and stream response
             placeholder = st.empty()
-            with st.spinner("Searching and generating answer..."):
-                try:
-                    # 1. Search local vector store for relevant chunks
-                    results = st.session_state.vector_store.similarity_search(query, k=4)
-                    context, citations = format_context(results)
-                    
-                    # 2. Ask the AI model using the retrieved context
-                    answer = generate_answer(
+            citations = []
+            answer = ""
+            try:
+                # 1. High-speed BM25 search
+                results = st.session_state.vector_store.similarity_search(query, k=4)
+                context, citations = format_context(results)
+                
+                # 2. Real-time token streaming from Gemini
+                active_api_key = st.session_state.get("gemini_api_key") or os.getenv("GEMINI_API_KEY")
+                answer_chunks = []
+                
+                with st.spinner("Analyzing document context..."):
+                    stream = generate_answer_stream(
                         query=query, 
                         context=context, 
                         chat_history=st.session_state.chat_history, 
-                        language=st.session_state.language
+                        language=st.session_state.language,
+                        api_key=active_api_key
                     )
-                except Exception as e:
-                    answer = f"⚠️ Processing Error: {str(e)}"
-                    citations = []
+                    try:
+                        first_chunk = next(stream, None)
+                    except Exception as e:
+                        first_chunk = None
+                        answer = f"⚠️ Gemini API Error: {str(e)}"
+                        
+                    if first_chunk:
+                        answer_chunks.append(first_chunk)
 
-            stream_text(placeholder, answer)
+                if answer_chunks:
+                    placeholder.markdown(f'<div class="msg-assistant">{first_chunk}▌</div>', unsafe_allow_html=True)
+                    for chunk in stream:
+                        answer_chunks.append(chunk)
+                        current_text = "".join(answer_chunks)
+                        placeholder.markdown(f'<div class="msg-assistant">{current_text}▌</div>', unsafe_allow_html=True)
+                    answer = "".join(answer_chunks)
+                elif not answer:
+                    answer = "No response generated."
+
+            except Exception as e:
+                answer = f"⚠️ Processing Error: {str(e)}"
+                citations = []
 
             # Citations
-            if st.session_state.show_citations and citations:
-                citations_html = render_citations(citations)
-                placeholder.markdown(
-                    f'<div class="msg-assistant">{answer}{citations_html}</div>',
-                    unsafe_allow_html=True,
-                )
+            citations_html = render_citations(citations) if (st.session_state.show_citations and citations) else ""
+            placeholder.markdown(
+                f'<div class="msg-assistant">{answer}{citations_html}</div>',
+                unsafe_allow_html=True,
+            )
 
             st.session_state.chat_history.append({
                 "role": "assistant",
@@ -690,7 +757,7 @@ else:
 
             for m in st.session_state.documents_meta:
                 ft = m["file_type"]
-                icon = {"PDF": "📕", "DOCX": "📘", "TXT": "📄"}.get(ft, "📄")
+                icon = {"PDF": "📕", "DOCX": "📘", "TXT": "📄", "MD": "📄"}.get(ft, "📄")
                 st.markdown(f"#### {icon} {m['filename']}")
                 if m.get("summary"):
                     st.markdown(f'<div class="summary-box">{m["summary"]}</div>', unsafe_allow_html=True)
@@ -702,7 +769,7 @@ else:
     with tab_keywords:
         for m in st.session_state.documents_meta:
             ft = m["file_type"]
-            icon = {"PDF": "📕", "DOCX": "📘", "TXT": "📄"}.get(ft, "📄")
+            icon = {"PDF": "📕", "DOCX": "📘", "TXT": "📄", "MD": "📄"}.get(ft, "📄")
             st.markdown(f"#### {icon} {m['filename']}")
             if m.get("keywords"):
                 tags_html = " ".join(f'<span class="kw-tag">{kw}</span>' for kw in m["keywords"])

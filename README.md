@@ -1,11 +1,11 @@
 
 # 🧠 DocMind — AI Document Q&A System
 
-DocMind is a modern AI-powered multi-document question answering and document intelligence system built using Streamlit, LangChain, FAISS, HuggingFace embeddings, and Google Gemini AI.
+DocMind is a high-performance AI-powered multi-document question answering and document intelligence system built using Streamlit, an inverted index with BM25 ranking, and Google Gemini AI.
 
-The application allows users to upload multiple PDFs, DOCX, TXT, and Markdown files and interact with them conversationally using semantic search and AI-generated responses.
+The application allows users to upload multiple PDFs, DOCX, TXT, and Markdown files and interact with them conversationally using sub-millisecond retrieval and real-time streaming AI responses.
 
-Designed with a premium dark editorial interface, DocMind focuses on intelligent retrieval, clean UI/UX, source transparency, and real-world usability.
+Designed with a premium dark editorial interface, DocMind focuses on intelligent retrieval, lightning-fast performance, source transparency, and real-world usability.
 
 ---
 
@@ -118,16 +118,13 @@ Features:
 - Python
 
 ## AI & NLP
-- Google Gemini API
-- LangChain
-- HuggingFace Sentence Transformers
-
-## Vector Database
-- FAISS
+- Google Gemini API (`google-genai` SDK)
+- Inverted Index & BM25 Ranking Engine
 
 ## Document Processing
-- PyPDFLoader
-- python-docx
+- `pypdf` (In-memory streaming)
+- `python-docx`
+- Native UTF-8/Latin-1 text parsers
 
 ---
 
@@ -136,18 +133,20 @@ Features:
 ```bash
 document-qa-system/
 │
-├── ui.py
 ├── app.py
+├── test_gemini.py
 ├── requirements.txt
+├── render.yaml
+├── Procfile
 ├── README.md
-├── .env
+├── .env.example
 │
 └── utils/
     ├── __init__.py
     ├── document_processor.py
     ├── vector_store.py
     └── llm_handler.py
-````
+```
 
 ---
 
@@ -207,7 +206,7 @@ Get API key from:
 ## Run Streamlit UI
 
 ```bash
-streamlit run ui.py
+streamlit run app.py
 ```
 
 Open browser:
