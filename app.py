@@ -14,6 +14,7 @@ import streamlit as st
 from utils.document_processor import load_document, chunk_documents
 from utils.vector_store import DocumentVectorStore, format_context
 from utils.llm_handler import (
+    get_client,
     generate_answer, 
     generate_answer_stream, 
     generate_summary, 
@@ -488,11 +489,12 @@ with st.sidebar:
                         
                         # 1. Extract Text directly in-memory (zero disk I/O overhead)
                         docs = load_document(content, filename=name, file_type=suffix)
-                        # 2. Chunk Text with boundary awareness
+                        # 2. Chunk Text with recursive boundary awareness
                         chunks = chunk_documents(docs)
-                        # 3. Store in Vector Store (indexed via inverted index)
+                        # 3. Store in Vector Store (hybrid indexing: dense semantic + BM25)
+                        active_client = get_client(active_api_key)
                         if chunks:
-                            st.session_state.vector_store.add_chunks(chunks)
+                            st.session_state.vector_store.add_chunks(chunks, client=active_client)
 
                         # Generate summary and keywords in a single fast API roundtrip
                         sample_text = " ".join([c["page_content"] for c in chunks[:8]]) if chunks else ""
@@ -681,12 +683,13 @@ else:
             citations = []
             answer = ""
             try:
-                # 1. High-speed BM25 search
-                results = st.session_state.vector_store.similarity_search(query, k=4)
+                # 1. Hybrid Search (Dense Semantic + Sparse BM25 fused with RRF)
+                active_api_key = st.session_state.get("gemini_api_key") or os.getenv("GEMINI_API_KEY")
+                active_client = get_client(active_api_key)
+                results = st.session_state.vector_store.similarity_search(query, k=4, client=active_client)
                 context, citations = format_context(results)
                 
-                # 2. Real-time token streaming from Gemini
-                active_api_key = st.session_state.get("gemini_api_key") or os.getenv("GEMINI_API_KEY")
+                # 2. Real-time token streaming from Gemini with strict inline citations
                 answer_chunks = []
                 
                 with st.spinner("Analyzing document context..."):
